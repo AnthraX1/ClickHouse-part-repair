@@ -67,12 +67,20 @@ When ClickHouse reports a corrupted column file, the error message and server lo
 Once you have identified the exact part and column file:
 
 1. **Detach the part or stop the server first.** Use `ALTER TABLE ... DETACH PART '...'` or stop `clickhouse-server` so nothing is reading or writing the part directory.
-2. **Make a byte-for-byte copy of the suspected files** into a safe working directory using `dd` (or an equivalent tool), for example:
+2. **Make a byte-for-byte copy of the suspected files** into a safe working directory using `dd` (or an equivalent tool). Because `conv=sync,noerror` pads incomplete blocks to the block size, the copy can be larger than the original; get the exact original size first and truncate the copy to match:
 
    ```bash
-   # Copy the corrupted column and its marks out of the part directory
+   # Get the exact original file size (in bytes)
+   ORIG_SIZE=$(stat -c %s /var/lib/clickhouse/data/db/table/partition/part/column.bin)
+
+   # Copy the corrupted column out of the part directory (pad on read errors; output may be larger)
    dd if=/var/lib/clickhouse/data/db/table/partition/part/column.bin of=new_dir/column.bin bs=4M conv=sync,noerror
+
+   # Drop any trailing NUL padding so the copy matches the original size
+   truncate -s "$ORIG_SIZE" new_dir/column.bin
    ```
+
+   Copy the corresponding mark file(s) (e.g. `column.mrk2` or `column.cmrk2`) into `new_dir` as well.
 
 3. **Run `clickhouse-part-repair` only on the copied files.** Do not point the tool directly at the live part directory; always work against the copied `.bin` (and `.mrk2` / `.cmrk2`), then copy the repaired output back into the detached part when you are satisfied with the result.
 
