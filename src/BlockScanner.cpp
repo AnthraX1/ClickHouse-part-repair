@@ -248,7 +248,7 @@ std::vector<ScanResult> BlockScanner::scan(const std::vector<BlockInfo> & blocks
 
         // Print lightweight progress to stderr without logging OK blocks per-line.
         ++processed;
-        std::cerr << "\rScanning block " << block.block_index << " / " << total_blocks << std::flush;
+        std::cerr << "\rScanning block " << (block.block_index + 1) << " / " << total_blocks << std::flush;
 
         // Block read OK — check checksum
         std::string checksum_status;
@@ -270,6 +270,8 @@ std::vector<ScanResult> BlockScanner::scan(const std::vector<BlockInfo> & blocks
 
                 // Still attempt decompression to salvage data
                 attemptDecompression(block, result);
+                if (result.health == BlockHealthStatus::HEALTHY)
+                    result.checksum_was_invalid = true; // repair must regenerate block to fix checksum
                 writeSalvageFiles(block, result);
                 results.push_back(std::move(result));
                 continue;
@@ -322,9 +324,9 @@ std::vector<ScanResult> BlockScanner::scan(const std::vector<BlockInfo> & blocks
         results.push_back(std::move(result));
     }
 
-    // Finish the progress line.
+    // Finish the progress line (show completion: N / N).
     if (total_blocks > 0)
-        std::cerr << "\rScanning block " << (total_blocks - 1) << " / " << total_blocks << std::endl;
+        std::cerr << "\rScanning block " << total_blocks << " / " << total_blocks << std::endl;
 
     logger_.info("Scan complete: " + std::to_string(blocks.size()) + " blocks total, "
         + std::to_string(healthy_count) + " healthy, "

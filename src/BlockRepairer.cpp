@@ -556,28 +556,46 @@ void BlockRepairer::repair(
 
         if (scan.health == BlockHealthStatus::HEALTHY)
         {
-            /// Healthy block: copy verbatim from original file (checksum + compressed data)
-            std::ifstream in(input_bin_path_, std::ios::binary);
-            if (!in.is_open())
-                throw std::runtime_error("Cannot open input file for repair: " + input_bin_path_);
+            /// Checksum was wrong but decompression succeeded: regenerate block so
+            /// the repaired file has a correct checksum instead of copying the bad one.
+            if (scan.checksum_was_invalid && !scan.decompressed_data.empty())
+            {
+                auto replacement = generateBlockFromDecompressed(
+                    scan.decompressed_data,
+                    block.method_byte);
+                out_file.write(replacement.data(), replacement.size());
+                current_offset += static_cast<uint64_t>(replacement.size());
+                ++blocks_replaced;
+                logger_.info("Regenerated block " + std::to_string(block.block_index)
+                    + " @ old offset " + std::to_string(block.file_offset)
+                    + " -> new offset " + std::to_string(offset_remap[static_cast<uint64_t>(block.file_offset)])
+                    + " (checksum was invalid, data recovered)");
+            }
+            else
+            {
+                /// Healthy block: copy verbatim from original file (checksum + compressed data)
+                std::ifstream in(input_bin_path_, std::ios::binary);
+                if (!in.is_open())
+                    throw std::runtime_error("Cannot open input file for repair: " + input_bin_path_);
 
-            const auto block_start =
-                static_cast<std::streamoff>(block.file_offset);
-            const auto on_disk_size =
-                static_cast<std::streamsize>(sizeof(Checksum) + block.compressed_size);
+                const auto block_start =
+                    static_cast<std::streamoff>(block.file_offset);
+                const auto on_disk_size =
+                    static_cast<std::streamsize>(sizeof(Checksum) + block.compressed_size);
 
-            in.seekg(block_start, std::ios::beg);
-            if (!in.good())
-                throw std::runtime_error("Failed to seek in input file during repair");
+                in.seekg(block_start, std::ios::beg);
+                if (!in.good())
+                    throw std::runtime_error("Failed to seek in input file during repair");
 
-            std::vector<char> buffer(static_cast<size_t>(on_disk_size));
-            in.read(buffer.data(), on_disk_size);
-            std::streamsize got = in.gcount();
-            if (got != on_disk_size)
-                throw std::runtime_error("Failed to read full block from input file during repair");
+                std::vector<char> buffer(static_cast<size_t>(on_disk_size));
+                in.read(buffer.data(), on_disk_size);
+                std::streamsize got = in.gcount();
+                if (got != on_disk_size)
+                    throw std::runtime_error("Failed to read full block from input file during repair");
 
-            out_file.write(buffer.data(), got);
-            current_offset += static_cast<uint64_t>(got);
+                out_file.write(buffer.data(), got);
+                current_offset += static_cast<uint64_t>(got);
+            }
         }
         else
         {

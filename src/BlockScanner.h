@@ -37,6 +37,10 @@ struct ScanResult
     std::vector<char> partial_data;
     size_t partial_bytes = 0;
 
+    /// True when checksum failed but decompression succeeded; repair must regenerate
+    /// the block (recompress + new checksum) instead of copying the block verbatim.
+    bool checksum_was_invalid = false;
+
     /// File paths of salvaged outputs (populated during scan).
     std::string partial_data_file;
     std::string raw_block_file;
