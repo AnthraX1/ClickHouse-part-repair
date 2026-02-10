@@ -58,6 +58,24 @@ cmake --build . --target clickhouse-part-repair -- -j$(nproc)
 - **Do not set `--output-dir` to a path inside the part folder.** If the output directory (e.g. `repair_output`) is created inside the part directory, ClickHouse will treat it as an invalid file when attaching the part and attachment will fail. Use a directory outside the part folder, then copy the repaired files into the part folder.
 - After copying repaired files into the part, **set ownership and permissions** on the copied files to match the rest of the part (typically the `clickhouse` user and the same permissions as other files in that part).
 
+### Finding the corrupted column and preparing a copy
+
+When ClickHouse reports a corrupted column file, the error message and server logs usually include the full path to the `.bin` file (and sometimes the part name), for example:
+
+- `Cannot read compressed block (corrupted data) from file /var/lib/clickhouse/data/db/table/partition/202401_1_1_0/column.bin`
+
+Once you have identified the exact part and column file:
+
+1. **Detach the part or stop the server first.** Use `ALTER TABLE ... DETACH PART '...'` or stop `clickhouse-server` so nothing is reading or writing the part directory.
+2. **Make a byte-for-byte copy of the suspected files** into a safe working directory using `dd` (or an equivalent tool), for example:
+
+   ```bash
+   # Copy the corrupted column and its marks out of the part directory
+   dd if=/var/lib/clickhouse/data/db/table/partition/part/column.bin of=new_dir/column.bin bs=4M conv=sync,noerror
+   ```
+
+3. **Run `clickhouse-part-repair` only on the copied files.** Do not point the tool directly at the live part directory; always work against the copied `.bin` (and `.mrk2` / `.cmrk2`), then copy the repaired output back into the detached part when you are satisfied with the result.
+
 ### Scan and diagnose
 
 ```bash
