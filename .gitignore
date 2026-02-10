@@ -36,6 +36,7 @@ Testing/
 
 ## IDE / editor files
 .vscode/
+.cursor/
 .idea/
 *.iml
 *.user
