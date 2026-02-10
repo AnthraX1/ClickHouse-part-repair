@@ -247,13 +247,13 @@ int main(int argc, char ** argv)
             PartRepair::FormatDetector detector(logger);
             detected_format = detector.detect(scan_results, marks.empty() ? nullptr : &marks);
 
-            // Once the format is determined, free any decompressed block data
-            // retained for sampling. From this point onward, we only need
-            // per-block metadata and (for corrupted blocks) partial salvage
-            // buffers, which are stored separately in ScanResult::partial_data.
+            // Once the format is determined, free decompressed block data retained
+            // for sampling — except for blocks with checksum_was_invalid, which
+            // repair must regenerate from decompressed_data to fix the checksum.
             for (auto & r : scan_results)
             {
-                std::vector<char>().swap(r.decompressed_data);
+                if (!r.checksum_was_invalid)
+                    std::vector<char>().swap(r.decompressed_data);
             }
 
             if (detected_format.empty())
