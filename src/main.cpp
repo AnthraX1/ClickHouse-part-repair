@@ -50,6 +50,9 @@ int main(int argc, char ** argv)
             ("default-null", po::bool_switch()->default_value(false),
                 "Use NULL as the default for repaired rows. "
                 "Only valid for Nullable(...) column types and mutually exclusive with --default-value.")
+            ("primary-key", po::bool_switch()->default_value(false),
+                "Column is part of ORDER BY; use boundary-checked partial salvage. Requires --format. "
+                "Stores first/last value per healthy block and fills repaired blocks with a value that satisfies sort order.")
             ("total-blocks", po::value<std::size_t>()->default_value(0)->value_name("N"),
                 "Expected total number of blocks in the column file. "
                 "Required with --repair when no mark file is provided. "
@@ -93,6 +96,7 @@ int main(int argc, char ** argv)
         bool repair_mode = vm["repair"].as<bool>();
         std::string default_value_literal = vm["default-value"].as<std::string>();
         bool default_null = vm["default-null"].as<bool>();
+        bool primary_key = vm["primary-key"].as<bool>();
         std::size_t expected_total_blocks = vm["total-blocks"].as<std::size_t>();
         std::string output_dir = vm["output-dir"].as<std::string>();
         std::string log_path = vm["log"].as<std::string>();
@@ -121,10 +125,25 @@ int main(int argc, char ** argv)
             logger.info("Custom default value (--default-value): '" + default_value_literal + "'");
         if (default_null)
             logger.info("Use NULL for repaired rows (--default-null): yes");
+        if (primary_key)
+            logger.info("Primary key (--primary-key): yes (boundary-checked partial salvage)");
         if (expected_total_blocks > 0)
             logger.info("Expected total blocks (from --total-blocks): " + std::to_string(expected_total_blocks));
         logger.info("Output dir: " + output_dir);
         logger.info("Log file: " + log_path);
+
+        if (primary_key && format.empty())
+        {
+            std::cerr << "Error: --format is required when using --primary-key.\n";
+            return 1;
+        }
+
+        if (primary_key && format.rfind("Nullable(", 0) == 0)
+        {
+            std::cerr << "Error: --primary-key cannot be used with Nullable types. "
+                      << "ClickHouse does not allow Nullable columns in ORDER BY.\n";
+            return 1;
+        }
 
         // require either a mark file (as an argument) or --bruteforce.
         if (mark_path.empty() && !bruteforce)
@@ -317,7 +336,8 @@ int main(int argc, char ** argv)
                 logger,
                 bin_path,
                 default_value_literal,
-                default_null);
+                default_null,
+                primary_key);
             repairer.repair(blocks, scan_results, marks, mark_path, output_bin, output_mark);
 
             logger.info("");

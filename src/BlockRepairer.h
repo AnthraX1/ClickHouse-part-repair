@@ -22,7 +22,8 @@ public:
         Logger & logger,
         const std::string & input_bin_path,
         const std::string & default_value_literal,
-        bool default_null);
+        bool default_null,
+        bool primary_key = false);
 
     /// Repair the .bin file.
     /// - blocks: original blocks from BlockIterator
@@ -52,6 +53,7 @@ private:
     std::string input_bin_path_;
     DefaultMode default_mode_ = DefaultMode::TypeDefault;
     std::string default_value_literal_;
+    bool primary_key_ = false;
 
     /// Serialize `row_count` default values according to the configured
     /// default mode (type default / explicit value / NULL for Nullable).
@@ -89,6 +91,17 @@ private:
 
     /// Get the byte width of the column type, or 0 for variable-width types.
     size_t getTypeWidth() const;
+
+    /// When primary_key_ is set: build repaired buffer using boundary checks (pick largest k in bounds, fill with value_k).
+    /// Returns decompressed buffer, or empty if not applicable.
+    std::vector<char> buildPrimaryKeyRepairedBuffer(
+        const ScanResult & scan,
+        size_t row_count,
+        const std::vector<char> * prev_block_last,
+        const std::vector<char> * next_block_first,
+        size_t & partial_rows_out,
+        size_t & default_rows_out,
+        std::vector<char> & picked_value_out);
 };
 
 } // namespace PartRepair

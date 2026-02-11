@@ -3,7 +3,7 @@
 > ⚠️ **Disclaimer**  
 > This tool directly manipulates low-level MergeTree part files and is intended as a last-resort recovery utility. It can **permanently discard bytes**, reconstruct rows using heuristic defaults, and regenerate mark files in ways that may not exactly match the original layout. Always work on copies: **back up the entire part folder before running the tool**, and keep those backups even after attaching the repaired part to a table. If a repair attempt makes things worse or reveals unexpected data shifts, you will only be able to recover by restoring from these original corrupted files.  
 >  
-> This software is provided **“as is”**, without warranty of any kind, express or implied. The author and contributors are **not liable for any data loss, downtime, or other damages** arising from the use or misuse of this tool. Use it at your own risk.
+> This software is provided **"as is"**, without warranty of any kind, express or implied. The author and contributors are **not liable for any data loss, downtime, or other damages** arising from the use or misuse of this tool. Use it at your own risk.
 
 A tool to scan, diagnose, and repair corrupted ClickHouse MergeTree `.bin` column files.
 
@@ -149,6 +149,46 @@ Without either, the tool will stop with an error once it encounters a corrupted 
   column.bin
 ```
 
+### Sort key (ORDER BY) columns
+
+MergeTree expects that for sort key columns every row within a block is sorted in ascending order, and the **last row of each block** is less than or equal to the **first row of the next block**. When a block is corrupted, the repaired block may violate these invariants and cause errors such as:
+
+`Code: 49. DB::Exception: Sort order of blocks violated for column number 0, left: UInt64_..., right: UInt64_... (LOGICAL_ERROR)`
+
+during merge or mutate. When repairing a column that is part of the table's `ORDER BY` (sort/primary key), use **`--primary-key`** so that repaired blocks preserve sort order.
+
+**What `--primary-key` does:**
+
+1. **Inter-block boundary checks.** The tool stores the first and last value of each healthy block. For each corrupted block it verifies that the last salvaged value lies between the previous block's last value and the next block's first value. If it does not, it backs off to an earlier salvaged row (or the previous block's last value) and uses that as the fill default.
+
+2. **Intra-block sort validation.** When a block has an invalid checksum but decompresses successfully, the decompressed data may still be corrupted. The tool scans rows within the block to find the longest sorted prefix. If the sort order is violated at some row, only the rows before the violation are kept; the rest are filled with the last sorted value (or the previous block's last value if that is out of range). The violation details are printed, for example:
+
+   ```
+   [primary-key] Block 47968: sort order violated at row 3089/8192, left: 7380660709789378393, right: 4274438819; fill_value=7380660709789378393
+   [primary-key] Block 47968: partial_rows=3089 fill_rows=5103 [prev_last=7380628022145972683, next_first=7380886550571433517]
+   ```
+
+3. **Boundary propagation.** After a block is repaired, the tool updates the tracked boundaries so that the next block sees the effective last value of the repaired block, not stale data from before the repair.
+
+**`--format` is required** when using `--primary-key`. Nullable types cannot be used with `--primary-key` because ClickHouse does not allow Nullable columns in ORDER BY.
+
+```bash
+# Primary-key repair (requires --format):
+./clickhouse-part-repair --repair --format UInt64 --primary-key column.bin column.mrk2
+```
+
+> **Warning: merging after sort key repair.**
+> After a sort key column is repaired, the corrupted rows are replaced with fill values (typically the last known sorted value or the previous block's boundary value). These fill values may duplicate keys that exist in other parts of the table. When ClickHouse runs background merges, rows sharing the same sort key across parts are merged together. For `ReplacingMergeTree`, `CollapsingMergeTree`, and similar engines this means the repaired rows may **replace or collapse real rows from other parts**.
+>
+> Before attaching the repaired part, query the table to back up rows whose keys overlap with the fill range:
+>
+> ```sql
+> -- Identify the fill value from the repair log, then back up affected rows:
+> SELECT * FROM my_table WHERE sort_key_column = <fill_value> INTO OUTFILE 'backup.tsv';
+> ```
+>
+> Keep this backup so you can restore the original rows if the merge discards them.
+
 ### Supported types for repair
 
 Fixed-width: `UInt8`, `Int8`, `Bool`, `UInt16`, `Int16`, `Date`, `UInt32`, `Int32`, `Float32`, `DateTime`, `IPv4`, `UInt64`, `Int64`, `Float64`, `DateTime64`, `UInt128`, `Int128`, `UUID`, `IPv6`, `UInt256`, `Int256`
@@ -199,9 +239,27 @@ Internally, the tool treats a MergeTree column file as a sequence of compressed 
 
 During scanning, the tool validates the stored checksum against a freshly computed CityHash128 over the compressed data (unless `--no-checksum` is set) and then attempts full decompression via the configured codec (LZ4, ZSTD, or NONE). If decompression fails but some output can still be salvaged, it runs a partial decompression path that records how many bytes were safely produced and writes both the raw on-disk block and any partial decompressed buffer to disk for forensic inspection. Scan results capture per-block health, codec, sizes, and salvage information, and are summarised in `repair.log`.
 
-Format detection and repair build on these scan results. If `--format` is not provided, the tool inspects healthy blocks (and, when available, marks) to infer the ClickHouse type, using fixed-width heuristics for numeric types and VarUInt-prefixed validation for `String`. In repair mode, each corrupted block is replaced either by a block built purely from default values or, when safe, by a mixture of salvaged rows and defaults. The notion of “default” is configurable: by default it uses the type’s built-in zero/empty value; `--default-value` lets you supply an explicit literal that is serialized according to the detected type (including the nested type of `Nullable(...)`); and `--default-null` fills `Nullable` columns with NULLs by writing a null map of ones plus nested defaults.
+Format detection and repair build on these scan results. If `--format` is not provided, the tool inspects healthy blocks (and, when available, marks) to infer the ClickHouse type, using fixed-width heuristics for numeric types and VarUInt-prefixed validation for `String`. In repair mode, each corrupted block is replaced either by a block built purely from default values or, when safe, by a mixture of salvaged rows and defaults. The notion of "default" is configurable: by default it uses the type's built-in zero/empty value; `--default-value` lets you supply an explicit literal that is serialized according to the detected type (including the nested type of `Nullable(...)`); and `--default-null` fills `Nullable` columns with NULLs by writing a null map of ones plus nested defaults.
 
 Row alignment is preserved by deriving the intended row count per block from the mark file whenever possible and then keeping `rows_count` and `offset_in_decompressed_block` unchanged when regenerating marks. Only the on-disk offsets are remapped to point at the new block positions. For variable-width types like `String` where no marks are available, the tool cannot reliably infer a row count, so it falls back to treating such blocks as empty while still maintaining the surrounding marks; this can discard data in that region, but it does not shift subsequent rows. When no mark file is provided at all, only the `.bin` file is repaired—mark regeneration is intentionally skipped because a correct `.mrk2` / `.cmrk2` cannot be reconstructed from the compressed stream alone.
+
+### Sort key / primary key repair internals
+
+ClickHouse MergeTree stores data sorted by the table's `ORDER BY` expression. Within each data part, every column's `.bin` file is a sequence of compressed blocks containing 8192 rows (the default `index_granularity`). For ORDER BY columns, ClickHouse enforces a strict invariant: rows are stored in ascending sort order both within each block and across consecutive blocks. During merges and mutations, `CheckSortedTransform` verifies this by comparing the last row of each chunk against the first row of the next. A violation triggers `LOGICAL_ERROR` code 49 and aborts the operation.
+
+When `--primary-key` is used, the tool enforces this invariant during repair through three mechanisms:
+
+**1. Boundary extraction.** Before the repair loop begins, the tool decompresses every healthy block and extracts its first and last value (using native ClickHouse binary format: raw fixed-width bytes for numeric types, or VarUInt-prefixed bytes for String). These boundary pairs are stored in a per-block array that acts as a lookup table for the repair phase.
+
+**2. Sort-aware block repair.** For each block that needs repair, the tool selects a strategy based on the block's condition:
+
+- **Checksum invalid, decompression succeeded:** The decompressed data exists but cannot be trusted. The tool scans row-by-row from the start to find the longest prefix where each row is >= the previous row (`compareValues`). If the entire block is sorted, it is used as-is with a regenerated checksum. If a sort violation is found at row N, rows 0 through N-1 are kept and the remaining rows are filled with the value at row N-1 (the last sorted value). If that value falls outside the inter-block boundary range `[prev_block_last, next_block_first]`, the previous block's last value is used instead.
+
+- **Decompression failed, partial data available:** The tool parses as many complete rows as possible from the partial decompression output. It then walks backward from the last parsed row to find the largest row index whose value lies within `[prev_block_last, next_block_first]`. Rows up to that point are kept; the rest are filled with that row's value.
+
+- **No usable data:** The block is filled entirely with the previous block's last value (to maintain sort continuity), or the type's default value if no previous boundary is available.
+
+**3. Boundary propagation.** After each block is repaired, the tool updates the boundary array with the effective first and last values of the repaired block. This ensures that the next block's repair sees the actual post-repair boundaries rather than stale pre-repair values. Without this step, a sequence of consecutive corrupted blocks would all use the same (too-old) boundary and produce values that violate inter-block sort order among themselves.
 
 ## Codec support
 
